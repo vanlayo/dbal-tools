@@ -15,6 +15,7 @@ use Psl\Str;
 use function Psl\Dict\map;
 use function Psl\Dict\merge;
 use function Psl\invariant;
+use function Psl\Vec\concat;
 use function Psl\Vec\map_with_key;
 
 /**
@@ -23,13 +24,15 @@ use function Psl\Vec\map_with_key;
 final class CompositeQuery implements Expression
 {
     /**
-     * @param QueryBuilder                $query
-     * @param array<string, QueryBuilder> $with
+     * @param QueryBuilder                                                      $query
+     * @param array<string, QueryBuilder>                                       $with
+     * @param array<string, array{base: QueryBuilder, recursive: QueryBuilder}> $recursiveWith
      */
     public function __construct(
         private Connection $connection,
         private QueryBuilder $query,
         private array $with,
+        private array $recursiveWith = [],
     ) {
     }
 
@@ -98,13 +101,113 @@ final class CompositeQuery implements Expression
     }
 
     /**
+     * Get both parts of a recursive subquery.
+     *
+     * @param non-empty-string $name
+     *
+     * @return array{base: QueryBuilder, recursive: QueryBuilder}
+     */
+    public function recursiveSubQuery(string $name): array
+    {
+        invariant(
+            array_key_exists($name, $this->recursiveWith),
+            'Recursive subquery "%s" does not exist.',
+            $name
+        );
+
+        return $this->recursiveWith[$name];
+    }
+
+    /**
+     * Get the base (anchor) query of a recursive subquery.
+     *
+     * @param non-empty-string $name
+     */
+    public function recursiveSubQueryBase(string $name): QueryBuilder
+    {
+        invariant(
+            array_key_exists($name, $this->recursiveWith),
+            'Recursive subquery "%s" does not exist.',
+            $name
+        );
+
+        return $this->recursiveWith[$name]['base'];
+    }
+
+    /**
+     * Get the recursive part of a recursive subquery.
+     *
+     * @param non-empty-string $name
+     */
+    public function recursiveSubQueryRecursive(string $name): QueryBuilder
+    {
+        invariant(
+            array_key_exists($name, $this->recursiveWith),
+            'Recursive subquery "%s" does not exist.',
+            $name
+        );
+
+        return $this->recursiveWith[$name]['recursive'];
+    }
+
+    /**
+     * @param non-empty-string $name
+     */
+    public function hasRecursiveSubQuery(string $name): bool
+    {
+        return array_key_exists($name, $this->recursiveWith);
+    }
+
+    /**
+     * Create a new recursive subquery with empty QueryBuilders.
+     *
+     * @param non-empty-string $name
+     *
+     * @return array{base: QueryBuilder, recursive: QueryBuilder}
+     */
+    public function createRecursiveSubQuery(string $name): array
+    {
+        $baseQuery = $this->connection->createQueryBuilder();
+        $recursiveQuery = $this->connection->createQueryBuilder();
+
+        $this->addRecursiveSubQuery($name, $baseQuery, $recursiveQuery);
+
+        return [
+            'base' => $baseQuery,
+            'recursive' => $recursiveQuery,
+        ];
+    }
+
+    /**
+     * Add a recursive subquery with both base and recursive parts.
+     *
+     * @param non-empty-string $name
+     */
+    public function addRecursiveSubQuery(
+        string $name,
+        QueryBuilder $baseQuery,
+        QueryBuilder $recursiveQuery,
+    ): self {
+        $this->recursiveWith[$name] = [
+            'base' => $baseQuery,
+            'recursive' => $recursiveQuery,
+        ];
+
+        return $this;
+    }
+
+    /**
      * @param non-empty-string $withAlias
      * @param non-empty-string $fromAlias
      *
      * @return JoinInfo
      */
-    public function joinOntoCte(string $withAlias, string $fromAlias, Column $column, ?Column $rightColumn = null): array
-    {
+    public function joinOntoCte(
+        string $withAlias,
+        string $fromAlias,
+        Column $column,
+        ?Column $rightColumn = null,
+    ): array {
         $rightColumn = $rightColumn ?? $column;
 
         return [
@@ -181,25 +284,34 @@ final class CompositeQuery implements Expression
         );
     }
 
-    /**
-     * @return non-empty-string
-     */
+    /** @return non-empty-string */
     public function toSQL(): string
     {
-        if (!$this->with) {
+        if (!$this->with && !$this->recursiveWith) {
             /** @var non-empty-string */
             return $this->query->getSQL();
         }
 
-        return sprintf(
-            'WITH %s %s',
-            Str\join(
-                map_with_key(
-                    $this->with,
-                    static fn (string $alias, QueryBuilder $query): string => $alias.' AS ('.$query->getSQL().')'
-                ),
-                ', '
+        $ctes = concat(
+            map_with_key(
+                $this->with,
+                static fn (string $alias, QueryBuilder $query): string => $alias.' AS ('.$query->getSQL().')'
             ),
+            map_with_key(
+                $this->recursiveWith,
+                static fn (string $alias, array $queries): string => Str\format(
+                    '%s AS (%s UNION ALL %s)',
+                    $alias,
+                    $queries['base']->getSQL(),
+                    $queries['recursive']->getSQL()
+                )
+            )
+        );
+
+        return sprintf(
+            '%s %s %s',
+            $this->recursiveWith ? 'WITH RECURSIVE' : 'WITH',
+            Str\join($ctes, ', '),
             $this->query->getSQL()
         );
     }

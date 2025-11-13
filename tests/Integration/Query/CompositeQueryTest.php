@@ -305,6 +305,153 @@ final class CompositeQueryTest extends DbalReaderTestCase
     }
 
     #[Test]
+    public function it_can_create_and_execute_recursive_cte(): void
+    {
+        $compositeQuery = CompositeQuery::from(self::connection());
+
+        $queries = $compositeQuery->createRecursiveSubQuery('numbers');
+        $queries['base']
+            ->select('1 AS n');
+
+        $queries['recursive']
+            ->select('n + 1 AS n')
+            ->from('numbers')
+            ->where('n < 5');
+
+        $compositeQuery->mainQuery()
+            ->select('n')
+            ->from('numbers');
+
+        $result = $compositeQuery->execute()->fetchAllAssociative();
+
+        self::assertSame([
+            ['n' => 1],
+            ['n' => 2],
+            ['n' => 3],
+            ['n' => 4],
+            ['n' => 5],
+        ], $result);
+    }
+
+    #[Test]
+    public function it_can_add_recursive_subquery(): void
+    {
+        $compositeQuery = CompositeQuery::from(self::connection());
+
+        $baseQuery = self::connection()->createQueryBuilder()->select('1 AS n');
+        $recursiveQuery = self::connection()->createQueryBuilder()
+            ->select('n + 1 AS n')
+            ->from('numbers')
+            ->where('n < 3');
+
+        $compositeQuery->addRecursiveSubQuery('numbers', $baseQuery, $recursiveQuery);
+
+        $compositeQuery->mainQuery()
+            ->select('n')
+            ->from('numbers');
+
+        $result = $compositeQuery->execute()->fetchAllAssociative();
+
+        self::assertSame([
+            ['n' => 1],
+            ['n' => 2],
+            ['n' => 3],
+        ], $result);
+    }
+
+    #[Test]
+    public function it_can_check_if_recursive_subquery_exists(): void
+    {
+        $compositeQuery = CompositeQuery::from(self::connection());
+        $compositeQuery->createRecursiveSubQuery('recursive_cte');
+
+        self::assertTrue($compositeQuery->hasRecursiveSubQuery('recursive_cte'));
+        self::assertFalse($compositeQuery->hasRecursiveSubQuery('non_existent'));
+    }
+
+    #[Test]
+    public function it_can_grab_recursive_subquery(): void
+    {
+        $compositeQuery = CompositeQuery::from(self::connection());
+        $queries = $compositeQuery->createRecursiveSubQuery('recursive_cte');
+
+        $queries['base']->select('1 AS n');
+        $queries['recursive']->select('n + 1')->from('recursive_cte');
+
+        $retrieved = $compositeQuery->recursiveSubQuery('recursive_cte');
+
+        self::assertSame($queries['base'], $retrieved['base']);
+        self::assertSame($queries['recursive'], $retrieved['recursive']);
+
+        $this->expectException(InvariantViolationException::class);
+        $compositeQuery->recursiveSubQuery('unknown');
+    }
+
+    #[Test]
+    public function it_can_grab_recursive_subquery_base(): void
+    {
+        $compositeQuery = CompositeQuery::from(self::connection());
+        $queries = $compositeQuery->createRecursiveSubQuery('recursive_cte');
+
+        $queries['base']->select('1 AS n');
+
+        $base = $compositeQuery->recursiveSubQueryBase('recursive_cte');
+
+        self::assertSame($queries['base'], $base);
+        self::assertSame('SELECT 1 AS n', $base->getSQL());
+
+        $this->expectException(InvariantViolationException::class);
+        $compositeQuery->recursiveSubQueryBase('unknown');
+    }
+
+    #[Test]
+    public function it_can_grab_recursive_subquery_recursive(): void
+    {
+        $compositeQuery = CompositeQuery::from(self::connection());
+        $queries = $compositeQuery->createRecursiveSubQuery('recursive_cte');
+
+        $queries['recursive']->select('n + 1')->from('recursive_cte');
+
+        $recursive = $compositeQuery->recursiveSubQueryRecursive('recursive_cte');
+
+        self::assertSame($queries['recursive'], $recursive);
+        self::assertSame('SELECT n + 1 FROM recursive_cte', $recursive->getSQL());
+
+        $this->expectException(InvariantViolationException::class);
+        $compositeQuery->recursiveSubQueryRecursive('unknown');
+    }
+
+    #[Test]
+    public function it_can_combine_regular_and_recursive_ctes(): void
+    {
+        $compositeQuery = CompositeQuery::from(self::connection());
+
+        $compositeQuery->createSubQuery('regular')
+            ->select('10 AS multiplier');
+
+        $queries = $compositeQuery->createRecursiveSubQuery('numbers');
+        $queries['base']->select('1 AS n');
+        $queries['recursive']
+            ->select('n + 1 AS n')
+            ->from('numbers')
+            ->where('n < 3');
+
+        // Main query combines both with explicit join
+        $compositeQuery->mainQuery()
+            ->select('numbers.n * regular.multiplier AS result')
+            ->from('numbers')
+            ->innerJoin('numbers', 'regular', 'regular', '1=1');
+
+        $result = $compositeQuery->execute()->fetchAllAssociative();
+
+        self::assertSame([
+            ['result' => 10],
+            ['result' => 20],
+            ['result' => 30],
+        ], $result);
+    }
+
+    #[Test]
     public function it_can_trigger_recursive_error(): void
     {
         $compositeQuery = CompositeQuery::from(self::connection());
